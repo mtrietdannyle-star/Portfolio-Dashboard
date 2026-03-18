@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -247,45 +246,59 @@ function PerfChart({positions,benchmarkComponents,rebalances,height=280}){
     async function loadHistory() {
       setStatus('loading');
       try {
-        // Fetch history for all position tickers + benchmark tickers
         const bmTickers = benchmarkComponents.map(c => c.ticker);
         const allTickers = [...new Set([...active.map(p => p.ticker), ...bmTickers])];
         const histMap = {};
 
         await Promise.all(allTickers.map(async (ticker) => {
           const hist = await fetchHistory(ticker, rangeDays);
-          if (hist) histMap[ticker] = hist;
+          if (hist && hist.length > 0) histMap[ticker] = hist;
         }));
 
         if (cancelled) return;
 
-        // Get all unique dates where all position tickers have data, starting from startDate
-        const positionDates = active.map(p => new Set((histMap[p.ticker] || []).map(d => d.date)));
-        const bmDates = bmTickers.map(t => new Set((histMap[t] || []).map(d => d.date)));
+        // Only use positions that returned historical data
+        const activeWithHist = active.filter(p => histMap[p.ticker] && histMap[p.ticker].length > 1);
+        const bmWithHist = bmTickers.filter(t => histMap[t] && histMap[t].length > 1);
 
-        // Find common dates across all position tickers
-        let commonDates = null;
-        positionDates.forEach(dateSet => {
-          if (!commonDates) commonDates = new Set(dateSet);
-          else commonDates = new Set([...commonDates].filter(d => dateSet.has(d)));
+        if (activeWithHist.length === 0 || bmWithHist.length === 0) { setStatus('error'); return; }
+
+        // Build date sets only from tickers that have data
+        const positionDateSets = activeWithHist.map(p => new Set(histMap[p.ticker].map(d => d.date)));
+        const bmDateSets = bmWithHist.map(t => new Set(histMap[t].map(d => d.date)));
+
+        // Find dates where at least the benchmark + majority of positions have data
+        // Start with benchmark dates as base
+        let baseDates = new Set(bmDateSets[0]);
+        bmDateSets.slice(1).forEach(ds => {
+          baseDates = new Set([...baseDates].filter(d => ds.has(d)));
         });
-        if (!commonDates || commonDates.size < 2) { setStatus('error'); return; }
 
-        // Also filter to dates where benchmark data exists
-        const allBmDates = new Set();
-        bmTickers.forEach(t => {
-          (histMap[t] || []).forEach(d => allBmDates.add(d.date));
-        });
-        commonDates = new Set([...commonDates].filter(d => allBmDates.has(d) && d >= startDate));
+        // Filter to dates after startDate
+        baseDates = new Set([...baseDates].filter(d => d >= startDate));
 
-        const sortedDates = [...commonDates].sort();
+        // For each date, calculate portfolio value using available positions
+        // (positions without data for that date use last known price)
+        const sortedDates = [...baseDates].sort();
         if (sortedDates.length < 2) { setStatus('error'); return; }
 
-        // Build price lookup
+        // Build price lookup with forward-fill for missing days
         const priceLookup = {};
         Object.entries(histMap).forEach(([ticker, hist]) => {
           priceLookup[ticker] = {};
           hist.forEach(d => { priceLookup[ticker][d.date] = d.close; });
+        });
+
+        // Forward-fill: for each ticker, fill gaps with last known price
+        Object.keys(priceLookup).forEach(ticker => {
+          let lastPrice = null;
+          sortedDates.forEach(date => {
+            if (priceLookup[ticker][date] != null) {
+              lastPrice = priceLookup[ticker][date];
+            } else if (lastPrice != null) {
+              priceLookup[ticker][date] = lastPrice;
+            }
+          });
         });
 
         // Calculate daily portfolio value
@@ -294,6 +307,7 @@ function PerfChart({positions,benchmarkComponents,rebalances,height=280}){
           active.forEach(p => {
             const price = priceLookup[p.ticker]?.[date];
             if (price) val += p.shares * price;
+            else val += p.shares * p.avgCost; // fallback to cost basis
           });
           return { date, value: val };
         });
@@ -309,13 +323,22 @@ function PerfChart({positions,benchmarkComponents,rebalances,height=280}){
           return { date, value: val };
         });
 
-        // Convert to cumulative returns
-        const baseP = portValues[0].value;
-        const baseB = bmValues[0].value;
-        const portData = portValues.map(d => ({ x: new Date(d.date), y: ((d.value - baseP) / baseP) * 100 }));
-        const bmData = bmValues.map(d => ({ x: new Date(d.date), y: ((d.value - baseB) / baseB) * 100 }));
+        // Filter out any dates where portfolio value is 0
+        const validIndices = sortedDates.map((d, i) => i).filter(i => portValues[i].value > 0 && bmValues[i].value > 0);
+        if (validIndices.length < 2) { setStatus('error'); return; }
 
-        setChartData({ portData, bmData });
+        const baseP = portValues[validIndices[0]].value;
+        const baseB = bmValues[validIndices[0]].value;
+        const portData = validIndices.map(i => ({ x: new Date(portValues[i].date), y: ((portValues[i].value - baseP) / baseP) * 100 }));
+        const bmData = validIndices.map(i => ({ x: new Date(bmValues[i].date), y: ((bmValues[i].value - baseB) / baseB) * 100 }));
+
+        // Calculate summary stats for display
+        const lastPort = portValues[validIndices[validIndices.length - 1]].value;
+        const lastBm = bmValues[validIndices[validIndices.length - 1]].value;
+        const portReturn = ((lastPort - baseP) / baseP) * 100;
+        const bmReturn = ((lastBm - baseB) / baseB) * 100;
+
+        setChartData({ portData, bmData, portReturn, bmReturn, coveredPct: Math.round((activeWithHist.length / active.length) * 100), missingTickers: active.filter(p => !histMap[p.ticker]).map(p => p.ticker) });
         setStatus('done');
       } catch (e) {
         console.error('History fetch error:', e);
@@ -356,9 +379,14 @@ function PerfChart({positions,benchmarkComponents,rebalances,height=280}){
 
   return React.createElement('div', null,
     status === 'loading' && React.createElement('div', { className: 'chart-status' }, 'FETCHING HISTORICAL PRICES...'),
-    status === 'error' && React.createElement('div', { className: 'chart-status', style: { color: 'var(--red)' } }, 'INSUFFICIENT HISTORICAL DATA — ADD POSITIONS FIRST'),
+    status === 'error' && React.createElement('div', { className: 'chart-status', style: { color: 'var(--red)' } }, 'COULD NOT LOAD HISTORICAL DATA — CHECK CONSOLE FOR DETAILS'),
     (status === 'done' && chartData) ? React.createElement('div', null,
-      React.createElement('div', { className: 'chart-status' }, `Since ${startLabel} (last rebalance)`),
+      React.createElement('div', { className: 'chart-status' },
+        `Since ${startLabel} (last rebalance)`,
+        chartData.coveredPct < 100 ? ` · ${chartData.coveredPct}% of positions have history` : '',
+        chartData.missingTickers && chartData.missingTickers.length > 0 ? ` · Missing: ${chartData.missingTickers.join(', ')} (using cost basis)` : '',
+        ` · Port: ${chartData.portReturn >= 0 ? '+' : ''}${chartData.portReturn.toFixed(2)}% vs BM: ${chartData.bmReturn >= 0 ? '+' : ''}${chartData.bmReturn.toFixed(2)}%`
+      ),
       React.createElement('div', { className: 'chart-wrap', style: { height } }, React.createElement('canvas', { ref })),
     ) : (status === 'idle' && active.length === 0) ? React.createElement('div', { className: 'empty-state', style: { height: 100 } }, 'IMPORT POSITIONS TO SEE PERFORMANCE') : null,
   );

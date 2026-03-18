@@ -183,39 +183,28 @@ function PerfChart(props){
     }
   }
 
-  // Update chart — use Chart.js data update instead of destroy/create when possible
-  var prevPeriodRef=useRef(period);
-  var prevLenRef=useRef(0);
+  // Update chart — keyed on period + data length only
+  var chartKey=period+'-'+(chartData?chartData.portData.length:0);
+  var prevKeyRef=useRef('');
 
   useEffect(function(){
     if(!canvasRef.current||!chartData)return;
+    if(chartKey===prevKeyRef.current)return; // no change
+    prevKeyRef.current=chartKey;
 
-    var needsRebuild=!chartRef.current||prevPeriodRef.current!==period;
-    prevPeriodRef.current=period;
+    // Destroy old chart if exists
+    if(chartRef.current)chartRef.current.destroy();
 
-    if(needsRebuild){
-      // Full rebuild only on period change or first render
-      if(chartRef.current)chartRef.current.destroy();
-      var firstX=chartData.portData[0].x.getTime(),lastX=chartData.portData[chartData.portData.length-1].x.getTime();
-      var spanHours=(lastX-firstX)/3600000;
-      var timeUnit=spanHours<2?'minute':spanHours<48?'hour':spanHours<720?'day':'week';
-      var timeFmt=timeUnit==='minute'?'HH:mm':timeUnit==='hour'?'MMM d HH:mm':'MMM d, yyyy';
+    var firstX=chartData.portData[0].x.getTime(),lastX=chartData.portData[chartData.portData.length-1].x.getTime();
+    var spanHours=(lastX-firstX)/3600000;
+    var timeUnit=spanHours<2?'minute':spanHours<48?'hour':spanHours<720?'day':'week';
+    var timeFmt=timeUnit==='minute'?'HH:mm':timeUnit==='hour'?'MMM d HH:mm':'MMM d, yyyy';
 
-      chartRef.current=new Chart(canvasRef.current,{type:'line',data:{datasets:[
-        {label:'Portfolio',data:chartData.portData,borderColor:'#ff8c00',backgroundColor:'rgba(255,140,0,.04)',borderWidth:2,fill:true,tension:0.2,pointRadius:chartData.portData.length<50?3:0,pointHitRadius:8,pointBackgroundColor:'#ff8c00'},
-        {label:bmLbl,data:chartData.bmData,borderColor:'#555',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.2,pointRadius:chartData.bmData.length<50?2:0,pointHitRadius:8}
-      ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},animation:{duration:0},plugins:{legend:{display:false},tooltip:{backgroundColor:'#111',borderColor:'#ff8c00',borderWidth:1,titleFont:{family:'Helvetica',size:10},bodyFont:{family:'Helvetica',size:10},padding:8,displayColors:false,callbacks:{label:function(c){return c.dataset.label+': '+(c.parsed.y>=0?'+':'')+c.parsed.y.toFixed(2)+'%'}}}},scales:{x:{type:'time',time:{unit:timeUnit,tooltipFormat:timeFmt},grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},maxTicksLimit:12},border:{display:false}},y:{grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},callback:function(v){return(v>=0?'+':'')+v.toFixed(1)+'%'}},border:{display:false}}}}});
-      prevLenRef.current=chartData.portData.length;
-    } else if(chartRef.current&&chartData.portData.length!==prevLenRef.current){
-      // Lightweight data update — no destroy/create
-      chartRef.current.data.datasets[0].data=chartData.portData;
-      chartRef.current.data.datasets[1].data=chartData.bmData;
-      chartRef.current.update('none'); // no animation
-      prevLenRef.current=chartData.portData.length;
-    }
-
-    return function(){};
-  });
+    chartRef.current=new Chart(canvasRef.current,{type:'line',data:{datasets:[
+      {label:'Portfolio',data:chartData.portData,borderColor:'#ff8c00',backgroundColor:'rgba(255,140,0,.04)',borderWidth:2,fill:true,tension:0.2,pointRadius:chartData.portData.length<50?3:0,pointHitRadius:8,pointBackgroundColor:'#ff8c00'},
+      {label:bmLbl,data:chartData.bmData,borderColor:'#555',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.2,pointRadius:chartData.bmData.length<50?2:0,pointHitRadius:8}
+    ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},animation:false,plugins:{legend:{display:false},tooltip:{backgroundColor:'#111',borderColor:'#ff8c00',borderWidth:1,titleFont:{family:'Helvetica',size:10},bodyFont:{family:'Helvetica',size:10},padding:8,displayColors:false,callbacks:{label:function(c){return c.dataset.label+': '+(c.parsed.y>=0?'+':'')+c.parsed.y.toFixed(2)+'%'}}}},scales:{x:{type:'time',time:{unit:timeUnit,tooltipFormat:timeFmt},grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},maxTicksLimit:12},border:{display:false}},y:{grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},callback:function(v){return(v>=0?'+':'')+v.toFixed(1)+'%'}},border:{display:false}}}}});
+  },[chartKey]);
 
   // Cleanup on unmount only
   useEffect(function(){return function(){if(chartRef.current){chartRef.current.destroy();chartRef.current=null;}};},[]);

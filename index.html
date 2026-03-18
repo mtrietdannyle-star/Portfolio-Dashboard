@@ -102,7 +102,7 @@ const PIE_COLORS=['#ff8c00','#00bfff','#ffd700','#00d26a','#ff3b3b','#9966ff','#
 // PERFORMANCE CHART
 // ════════════════════════════════════════════════════
 function PerfChart(props){
-  var positions=props.positions,benchmarkComponents=props.benchmarkComponents,rebalances=props.rebalances,snapshots=props.snapshots,height=props.height||280;
+  var positions=props.positions,benchmarkComponents=props.benchmarkComponents,rebalances=props.rebalances,snapshots=props.snapshots,snapCount=props.snapCount||0,height=props.height||280;
   var ref=useRef(null),ch=useRef(null);
   var _s=useState('idle'),status=_s[0],setStatus=_s[1];
   var _c=useState(null),rawData=_c[0],setRawData=_c[1]; // all data points
@@ -181,7 +181,7 @@ function PerfChart(props){
     })();
 
     return function(){cancelled=true;};
-  },[active.length,snapshots?snapshots.length:0]);
+  },[active.length,snapCount]);
 
   // Filter data by period
   var chartData=null;
@@ -226,7 +226,7 @@ function PerfChart(props){
   var periods=['INCEP','YTD','1M','7D'];
   return el('div',null,
     status==='loading'&&el('div',{className:'chart-status'},'FETCHING HISTORICAL DATA...'),
-    status==='building'&&el('div',{className:'chart-status',style:{color:'var(--yellow)'}},'BUILDING \u2014 '+(snapshots?snapshots.length:0)+' auto-snapshots (need 2+). Saving each minute.'),
+    status==='building'&&el('div',{className:'chart-status',style:{color:'var(--yellow)'}},'BUILDING \u2014 '+(snapshots?snapshots.length:0)+' auto-snapshots (need 2+). Saving every 5 min.'),
     (status==='done')?el('div',null,
       el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'4px 10px'}},
         el('div',{className:'chart-status',style:{padding:0}},
@@ -298,9 +298,17 @@ function App(){
   var _e=useState(null),editPos=_e[0],setEditPos=_e[1];
   var _r=useState({date:new Date().toISOString().slice(0,10),action:'BUY',ticker:'',shares:'',price:'',notes:''}),rebalF=_r[0],setRebalF=_r[1];
   var _fc=useState(0),fetchCount=_fc[0],setFetchCount=_fc[1];
-  // Ref for latest data to avoid stale closure in auto-snapshot
+
+  // Snapshots stored separately to avoid triggering re-renders/re-fetches
+  var snapRef=useRef(null);
+  var _sc=useState(0),snapCount=_sc[0],setSnapCount=_sc[1]; // just a counter to trigger chart updates occasionally
+  function loadSnaps(){try{var s=localStorage.getItem('bb_snapshots_v7');return s?JSON.parse(s):[];}catch(e){return[];}}
+  function saveSnaps(arr){try{localStorage.setItem('bb_snapshots_v7',JSON.stringify(arr));}catch(e){}}
+  if(!snapRef.current)snapRef.current=loadSnaps();
+
   var dataRef=useRef(data);
   dataRef.current=data;
+  var lastSnapTime=useRef(0); // throttle: one snap per 5 min
 
   useEffect(function(){save(data);},[data]);
 
@@ -315,21 +323,26 @@ function App(){
       var priceMap={};q.forEach(function(x){if(x.regularMarketPrice>0)priceMap[x.symbol]={price:x.regularMarketPrice,prevClose:x.regularMarketPreviousClose,change:x.regularMarketChange,changePct:x.regularMarketChangePercent,name:x.shortName||x.symbol};});
       setPrices(function(prev){var next=Object.assign({},prev);Object.keys(priceMap).forEach(function(k){next[k]=priceMap[k];});return next;});
 
-      // Auto-snapshot
-      var activePos=d.positions.filter(function(p){return p.shares>0});
-      if(activePos.length>0){
-        var portVal=0;activePos.forEach(function(p){var pr=priceMap[p.ticker];if(pr)portVal+=p.shares*pr.price;});
-        var tw=d.benchmarkComponents.reduce(function(s,c){return s+c.weight},0)||100;
-        var bmVal=0;d.benchmarkComponents.forEach(function(c){var pr=priceMap[c.ticker];if(pr)bmVal+=(c.weight/tw)*pr.price;});
-        if(portVal>0&&bmVal>0){
-          var snapKey=new Date().toISOString().slice(0,16);
-          setData(function(prev){
-            var existing=prev.snapshots||[];
-            if(existing.some(function(s){return s.date===snapKey}))return prev;
-            var newSnaps=existing.concat([{date:snapKey,portfolioValue:portVal,benchmarkValue:bmVal,auto:true}]);
-            if(newSnaps.length>1000)newSnaps=newSnaps.slice(newSnaps.length-1000);
-            return Object.assign({},prev,{snapshots:newSnaps});
-          });
+      // Auto-snapshot — throttled to every 5 minutes, stored outside React state
+      var now=Date.now();
+      if(now-lastSnapTime.current>=300000){ // 5 min
+        var activePos=d.positions.filter(function(p){return p.shares>0});
+        if(activePos.length>0){
+          var portVal=0;activePos.forEach(function(p){var pr=priceMap[p.ticker];if(pr)portVal+=p.shares*pr.price;});
+          var tw=d.benchmarkComponents.reduce(function(s,c){return s+c.weight},0)||100;
+          var bmVal=0;d.benchmarkComponents.forEach(function(c){var pr=priceMap[c.ticker];if(pr)bmVal+=(c.weight/tw)*pr.price;});
+          if(portVal>0&&bmVal>0){
+            var snapKey=new Date().toISOString().slice(0,16);
+            var snaps=snapRef.current;
+            if(!snaps.some(function(s){return s.date===snapKey})){
+              snaps.push({date:snapKey,portfolioValue:portVal,benchmarkValue:bmVal});
+              if(snaps.length>500)snaps=snaps.slice(snaps.length-500);
+              snapRef.current=snaps;
+              saveSnaps(snaps);
+              lastSnapTime.current=now;
+              setSnapCount(function(c){return c+1}); // trigger chart update
+            }
+          }
         }
       }
 
@@ -362,7 +375,7 @@ function App(){
   var addP=function(pos){var nid=Math.max.apply(null,[0].concat(data.positions.map(function(p){return p.id})))+1;mut(function(d){return Object.assign({},d,{positions:d.positions.concat([Object.assign({},pos,{id:nid})])})});setShowAddPos(false);};
   var updP=function(id,u){mut(function(d){return Object.assign({},d,{positions:d.positions.map(function(p){return p.id===id?Object.assign({},p,u):p})})})};
   var delP=function(id){if(confirm('Remove?'))mut(function(d){return Object.assign({},d,{positions:d.positions.filter(function(p){return p.id!==id})})})};
-  var addSnap=function(s){mut(function(d){return Object.assign({},d,{snapshots:d.snapshots.concat([s])})});setShowSnap(false);};
+  var addSnap=function(s){var snaps=snapRef.current;snaps.push(s);snapRef.current=snaps;saveSnaps(snaps);setSnapCount(function(c){return c+1});setShowSnap(false);};
   var addReb=function(){if(!rebalF.ticker||!rebalF.shares||!rebalF.price)return;mut(function(d){return Object.assign({},d,{rebalances:[{id:Date.now(),date:rebalF.date,action:rebalF.action,ticker:rebalF.ticker.toUpperCase(),shares:parseFloat(rebalF.shares),price:parseFloat(rebalF.price),notes:rebalF.notes}].concat(d.rebalances)})});setRebalF({date:new Date().toISOString().slice(0,10),action:'BUY',ticker:'',shares:'',price:'',notes:''});};
   var delR=function(id){mut(function(d){return Object.assign({},d,{rebalances:d.rebalances.filter(function(r){return r.id!==id})})})};
   var handleCSVImport=function(positions,rebalEntries){var nextId=Math.max.apply(null,[0].concat(data.positions.map(function(p){return p.id})))+1;var np=positions.map(function(p,i){return Object.assign({},p,{id:nextId+i})});var merged=data.positions.slice();np.forEach(function(n){var ex=merged.findIndex(function(e){return e.ticker===n.ticker});if(ex>=0)merged[ex]=Object.assign({},merged[ex],{shares:n.shares,avgCost:n.avgCost});else merged.push(n);});setData(function(prev){return Object.assign({},prev,{positions:merged,rebalances:rebalEntries.concat(prev.rebalances)})});};
@@ -393,7 +406,7 @@ function App(){
       el('div',{className:'main-grid'},
         el('div',{className:'panel'},
           el('div',{className:'panel-header'},el('span',{className:'panel-title'},'Portfolio vs Blended Benchmark'),el('div',{className:'chart-legend'},el('span',null,el('span',{className:'dot',style:{background:'#ff8c00'}}),' Portfolio'),el('span',null,el('span',{className:'dot',style:{background:'#555'}}),' '+bmLbl))),
-          el(PerfChart,{positions:data.positions,benchmarkComponents:data.benchmarkComponents,rebalances:data.rebalances,snapshots:data.snapshots})
+          el(PerfChart,{positions:data.positions,benchmarkComponents:data.benchmarkComponents,rebalances:data.rebalances,snapshots:snapRef.current,snapCount:snapCount})
         ),
         el('div',{className:'panel'},
           el('div',{className:'panel-header'},el('span',{className:'panel-title'},'Live Prices'),lastUpdate&&el('span',{style:{fontSize:9,color:'var(--text-muted)'}},lastUpdate.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'}))),

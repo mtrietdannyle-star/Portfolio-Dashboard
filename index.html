@@ -390,36 +390,62 @@ function Modal({isOpen,onClose,title,children}){if(!isOpen)return null;return Re
 
 // CSV IMPORT MODAL
 function CSVImportModal({isOpen,onClose,onImport}){
-  const[txns,setTxns]=useState(null);const[positions,setPositions]=useState(null);const[error,setError]=useState(null);const[dragOver,setDragOver]=useState(false);const el=React.createElement;
-  const handleFile=file=>{const reader=new FileReader();reader.onload=ev=>{const result=parseSchwabCSV(ev.target.result);if(result.error){setError(result.error);return;}setTxns(result.transactions);setPositions(calcPositionsFromTxns(result.transactions));setError(null);};reader.readAsText(file);};
+  const[txns,setTxns]=useState(null);const[positions,setPositions]=useState(null);const[error,setError]=useState(null);const[dragOver,setDragOver]=useState(false);const[imported,setImported]=useState(false);const el=React.createElement;
+
+  const doImport=(parsedTxns,parsedPositions)=>{
+    if(parsedPositions&&parsedPositions.length){
+      const rebalEntries=parsedTxns.filter(t=>t.relevant).map((t,i)=>({id:Date.now()+i,date:t.date,action:t.type==='sell'?'SELL':t.type==='reinvest'?'ADD':'BUY',ticker:t.symbol,shares:t.qty,price:t.price,notes:'Schwab CSV'}));
+      onImport(parsedPositions,rebalEntries);
+      setImported(true);
+    }
+  };
+
+  const handleFile=file=>{const reader=new FileReader();reader.onload=ev=>{
+    const result=parseSchwabCSV(ev.target.result);
+    if(result.error){setError(result.error);return;}
+    const calcPos=calcPositionsFromTxns(result.transactions);
+    setTxns(result.transactions);setPositions(calcPos);setError(null);
+    // Auto-import immediately
+    doImport(result.transactions,calcPos);
+  };reader.readAsText(file);};
+
   const handleDrop=e=>{e.preventDefault();setDragOver(false);const f=e.dataTransfer.files[0];if(f)handleFile(f);};
   const handleClick=()=>{const i=document.createElement('input');i.type='file';i.accept='.csv';i.onchange=e=>{const f=e.target.files[0];if(f)handleFile(f);};i.click();};
-  const toggleSleeve=idx=>{setPositions(p=>p.map((pos,i)=>i===idx?{...pos,sleeve:pos.sleeve==='etf'?'stock':'etf'}:pos));};
+  const toggleSleeve=(idx)=>{
+    setPositions(p=>{
+      const updated=p.map((pos,i)=>i===idx?{...pos,sleeve:pos.sleeve==='etf'?'stock':'etf'}:pos);
+      // Re-apply with updated sleeves
+      if(txns){doImport(txns,updated);}
+      return updated;
+    });
+  };
+
   if(!isOpen)return null;
-  return el(Modal,{isOpen,onClose:()=>{setTxns(null);setPositions(null);setError(null);onClose();},title:'IMPORT SCHWAB TRANSACTIONS'},
+  return el(Modal,{isOpen,onClose:()=>{setTxns(null);setPositions(null);setError(null);setImported(false);onClose();},title:'IMPORT SCHWAB TRANSACTIONS'},
     !txns?el('div',null,
       el('div',{className:`csv-drop ${dragOver?'dragover':''}`,onClick:handleClick,onDragOver:e=>{e.preventDefault();setDragOver(true);},onDragLeave:()=>setDragOver(false),onDrop:handleDrop},
-        el('div',{style:{fontSize:13,fontWeight:700,color:'var(--orange)',marginBottom:6}},'DROP SCHWAB CSV HERE'),el('div',{style:{fontSize:10,color:'var(--text-muted)'}},'expects "Individual_XXX_Transactions" format')),
+        el('div',{style:{fontSize:13,fontWeight:700,color:'var(--orange)',marginBottom:6}},'DROP SCHWAB CSV HERE'),
+        el('div',{style:{fontSize:10,color:'var(--text-muted)'}},'Positions & rebalance log will be auto-imported')),
       error&&el('div',{style:{color:'var(--red)',marginTop:8,fontSize:11}},error),
     ):el('div',null,
-      el('div',{style:{fontSize:10,color:'var(--text-muted)',marginBottom:8}},`${txns.length} transactions — ${txns.filter(t=>t.relevant).length} trades`),
+      imported&&el('div',{style:{padding:'8px 10px',background:'rgba(0,210,106,.08)',border:'1px solid var(--green)',marginBottom:10,fontSize:11}},
+        el('span',{style:{color:'var(--green)',fontWeight:700}},'✓ IMPORTED '),
+        `${positions.length} positions and ${txns.filter(t=>t.relevant).length} trades added to holdings & rebalance log`),
+      el('div',{style:{fontSize:10,color:'var(--text-muted)',marginBottom:8}},`${txns.length} transactions parsed — ${txns.filter(t=>t.relevant).length} trades (Buy/Sell/Reinvest)`),
+      positions&&positions.length>0&&el('div',{className:'csv-summary'},
+        el('h4',null,`POSITIONS (${positions.length}) — click sleeve to toggle`),
+        el('div',{className:'csv-pos-row header'},el('span',null,'Ticker'),el('span',null,'Shares'),el('span',null,'Avg Cost'),el('span',null,'Cost Basis'),el('span',null,'Sleeve')),
+        positions.map((p,i)=>el('div',{key:p.ticker,className:'csv-pos-row'},
+          el('span',{style:{fontWeight:700}},p.ticker),el('span',null,fmt(p.shares,4)),el('span',null,'$'+fmt(p.avgCost)),el('span',null,'$'+fmt(p.shares*p.avgCost)),
+          el('button',{className:'btn btn-sm',onClick:()=>toggleSleeve(i),style:{padding:'1px 6px'}},el('span',{className:`sleeve-tag ${p.sleeve}`,style:{margin:0}},p.sleeve))))),
       el('div',{className:'csv-preview'},el('table',null,
         el('thead',null,el('tr',null,['Date','Action','Symbol','Qty','Price','Amount'].map(h=>el('th',{key:h},h)))),
         el('tbody',null,txns.slice(0,30).map((t,i)=>el('tr',{key:i,className:t.relevant?'':'csv-row-skip'},
           el('td',{style:{textAlign:'left'}},t.date),el('td',{className:t.type==='buy'||t.type==='reinvest'?'csv-action-buy':t.type==='sell'?'csv-action-sell':'muted',style:{textAlign:'left',fontWeight:600}},t.action),
           el('td',{style:{fontWeight:700}},t.symbol||'—'),el('td',null,t.qty?fmt(t.qty,4):'—'),el('td',null,t.price?'$'+fmt(t.price):'—'),el('td',{className:t.amount>=0?'green':'red'},t.amount?'$'+fmt(t.amount):'—')))),
         txns.length>30&&el('div',{className:'empty-state',style:{padding:8}},`+ ${txns.length-30} more`))),
-      positions&&positions.length>0&&el('div',{className:'csv-summary'},
-        el('h4',null,`POSITIONS (${positions.length})`),
-        el('div',{className:'csv-pos-row header'},el('span',null,'Ticker'),el('span',null,'Shares'),el('span',null,'Avg Cost'),el('span',null,'Cost Basis'),el('span',null,'Sleeve')),
-        positions.map((p,i)=>el('div',{key:p.ticker,className:'csv-pos-row'},
-          el('span',{style:{fontWeight:700}},p.ticker),el('span',null,fmt(p.shares,4)),el('span',null,'$'+fmt(p.avgCost)),el('span',null,'$'+fmt(p.shares*p.avgCost)),
-          el('button',{className:'btn btn-sm',onClick:()=>toggleSleeve(i),style:{padding:'1px 6px'}},el('span',{className:`sleeve-tag ${p.sleeve}`,style:{margin:0}},p.sleeve))))),
       el('div',{className:'modal-actions'},
-        el('button',{className:'btn',onClick:()=>{setTxns(null);setPositions(null);}},'BACK'),
-        el('button',{className:'btn btn-primary',onClick:()=>{if(positions&&positions.length){
-          const rebalEntries=txns.filter(t=>t.relevant).map((t,i)=>({id:Date.now()+i,date:t.date,action:t.type==='sell'?'SELL':t.type==='reinvest'?'ADD':'BUY',ticker:t.symbol,shares:t.qty,price:t.price,notes:'Schwab CSV'}));
-          onImport(positions,rebalEntries);setTxns(null);setPositions(null);onClose();}}},'IMPORT')),
+        el('button',{className:'btn btn-primary',onClick:()=>{setTxns(null);setPositions(null);setImported(false);onClose();}},'DONE')),
     ));
 }
 

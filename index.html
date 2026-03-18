@@ -105,26 +105,15 @@ function PerfChart(props){
   var positions=props.positions,benchmarkComponents=props.benchmarkComponents,rebalances=props.rebalances,snapshots=props.snapshots,height=props.height||280;
   var ref=useRef(null),ch=useRef(null);
   var _s=useState('idle'),status=_s[0],setStatus=_s[1];
-  var _c=useState(null),chartData=_c[0],setChartData=_c[1];
+  var _c=useState(null),rawData=_c[0],setRawData=_c[1]; // all data points
+  var _p=useState('INCEP'),period=_p[0],setPeriod=_p[1]; // INCEP, 7D, 1M, YTD
   var active=positions.filter(function(p){return p.shares>0});
   var bmLbl=bmLabel(benchmarkComponents);
+  var INCEPTION='2026-02-02';
 
-  var startDate=(function(){
-    if(!rebalances||rebalances.length===0){var d=new Date();d.setMonth(d.getMonth()-3);return d.toISOString().slice(0,10);}
-    var sorted=rebalances.slice().sort(function(a,b){
-      var pa=function(s){if(s.indexOf('/')>=0){var parts=s.split('/');return new Date(parts[2]+'-'+parts[0]+'-'+parts[1]);}return new Date(s);};
-      return pa(b.date)-pa(a.date);
-    });
-    var raw=sorted[0].date;
-    if(raw.indexOf('/')>=0){var parts=raw.split('/');return parts[2]+'-'+parts[0].padStart(2,'0')+'-'+parts[1].padStart(2,'0');}
-    return raw;
-  })();
-
-  var rangeDays=Math.ceil((new Date()-new Date(startDate))/86400000)+5;
-  var range=rangeDays<=7?'5d':rangeDays<=35?'1mo':rangeDays<=100?'3mo':rangeDays<=200?'6mo':'1y';
-
+  // Fetch all available data (max range)
   useEffect(function(){
-    if(active.length===0){setChartData(null);setStatus('idle');return;}
+    if(active.length===0){setRawData(null);setStatus('idle');return;}
     var cancelled=false;
 
     (async function(){
@@ -133,16 +122,18 @@ function PerfChart(props){
       var allTickers=Array.from(new Set(active.map(function(p){return p.ticker}).concat(bmTickers)));
       var histMap=null;
 
-      try{histMap=await fetchBatchHistory(allTickers,range);}catch(e){console.error('Batch history failed:',e);}
+      // Always fetch max range for inception
+      try{histMap=await fetchBatchHistory(allTickers,'6mo');}catch(e){console.error('Batch history failed:',e);}
       if(cancelled)return;
 
-      // Try to build chart from history
+      var allPoints=[];
+
+      // Build from history if available
       if(histMap){
         var bmWithHist=bmTickers.filter(function(t){return histMap[t]&&histMap[t].length>1});
         if(bmWithHist.length>0){
           var baseDates=new Set(histMap[bmWithHist[0]].map(function(d){return d.date}));
           bmWithHist.slice(1).forEach(function(t){var ds=new Set((histMap[t]||[]).map(function(d){return d.date}));baseDates=new Set(Array.from(baseDates).filter(function(d){return ds.has(d)}));});
-          baseDates=new Set(Array.from(baseDates).filter(function(d){return d>=startDate}));
           var sortedDates=Array.from(baseDates).sort();
 
           if(sortedDates.length>=2){
@@ -150,52 +141,75 @@ function PerfChart(props){
             Object.keys(lookup).forEach(function(t){var last=null;sortedDates.forEach(function(d){if(lookup[t][d]!=null)last=lookup[t][d];else if(last!=null)lookup[t][d]=last;});});
 
             var tw=benchmarkComponents.reduce(function(s,c){return s+c.weight},0)||100;
-            var portV=sortedDates.map(function(d){var v=0;active.forEach(function(p){var pr=lookup[p.ticker]&&lookup[p.ticker][d];v+=p.shares*(pr||p.avgCost);});return{d:d,v:v}});
-            var bmV=sortedDates.map(function(d){var v=0;benchmarkComponents.forEach(function(c){var pr=lookup[c.ticker]&&lookup[c.ticker][d];if(pr)v+=(c.weight/tw)*pr;});return{d:d,v:v}});
-            var vi=sortedDates.map(function(_,i){return i}).filter(function(i){return portV[i].v>0&&bmV[i].v>0});
-
-            if(vi.length>=2){
-              var bp=portV[vi[0]].v,bb=bmV[vi[0]].v;
-              var awh=active.filter(function(p){return !!histMap[p.ticker]});
-              setChartData({
-                portData:vi.map(function(i){return{x:new Date(portV[i].d),y:((portV[i].v-bp)/bp)*100}}),
-                bmData:vi.map(function(i){return{x:new Date(bmV[i].d),y:((bmV[i].v-bb)/bb)*100}}),
-                pRet:((portV[vi[vi.length-1]].v-bp)/bp)*100,
-                bRet:((bmV[vi[vi.length-1]].v-bb)/bb)*100,
-                src:'history',cov:Math.round((awh.length/active.length)*100),
-                miss:active.filter(function(p){return!histMap[p.ticker]}).map(function(p){return p.ticker})
-              });
-              setStatus('done');return;
-            }
+            sortedDates.forEach(function(d){
+              var pv=0;active.forEach(function(p){var pr=lookup[p.ticker]&&lookup[p.ticker][d];pv+=p.shares*(pr||p.avgCost);});
+              var bv=0;benchmarkComponents.forEach(function(c){var pr=lookup[c.ticker]&&lookup[c.ticker][d];if(pr)bv+=(c.weight/tw)*pr;});
+              if(pv>0&&bv>0)allPoints.push({date:d,pv:pv,bv:bv,src:'hist'});
+            });
           }
         }
       }
 
-      // Fallback: use snapshots
-      if(snapshots&&snapshots.length>=2){
-        var sorted2=snapshots.slice().sort(function(a,b){return new Date(a.date)-new Date(b.date)});
-        var bp2=sorted2[0].portfolioValue,bb2=sorted2[0].benchmarkValue;
-        setChartData({
-          portData:sorted2.map(function(s){return{x:new Date(s.date),y:((s.portfolioValue-bp2)/bp2)*100}}),
-          bmData:sorted2.map(function(s){return{x:new Date(s.date),y:((s.benchmarkValue-bb2)/bb2)*100}}),
-          pRet:((sorted2[sorted2.length-1].portfolioValue-bp2)/bp2)*100,
-          bRet:((sorted2[sorted2.length-1].benchmarkValue-bb2)/bb2)*100,
-          src:'snapshots'
+      // Append auto-snapshots (they have minute-level granularity)
+      if(snapshots&&snapshots.length>0){
+        var lastHistDate=allPoints.length>0?allPoints[allPoints.length-1].date:'';
+        snapshots.forEach(function(s){
+          // Only add snapshots that are after the last history date (avoid duplicates)
+          if(s.date>lastHistDate&&s.portfolioValue>0&&s.benchmarkValue>0){
+            allPoints.push({date:s.date,pv:s.portfolioValue,bv:s.benchmarkValue,src:'snap'});
+          }
         });
-        setStatus('done');return;
       }
 
-      setStatus('building');
+      allPoints.sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
+
+      if(allPoints.length>=2){
+        var awh=histMap?active.filter(function(p){return!!histMap[p.ticker]}):[];
+        setRawData({
+          points:allPoints,
+          cov:histMap?Math.round((awh.length/active.length)*100):null,
+          miss:histMap?active.filter(function(p){return!histMap[p.ticker]}).map(function(p){return p.ticker}):null
+        });
+        setStatus('done');
+      } else if(snapshots&&snapshots.length>=2){
+        var snSorted=snapshots.slice().sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
+        setRawData({points:snSorted.map(function(s){return{date:s.date,pv:s.portfolioValue,bv:s.benchmarkValue,src:'snap'}}),cov:null,miss:null});
+        setStatus('done');
+      } else {
+        setStatus('building');
+      }
     })();
 
     return function(){cancelled=true;};
-  },[active.length,startDate,range,snapshots?snapshots.length:0]);
+  },[active.length,snapshots?snapshots.length:0]);
+
+  // Filter data by period
+  var chartData=null;
+  if(rawData&&rawData.points.length>=2){
+    var cutoff='';
+    var now=new Date();
+    if(period==='INCEP'){cutoff=INCEPTION;}
+    else if(period==='7D'){var d7=new Date(now);d7.setDate(d7.getDate()-7);cutoff=d7.toISOString().slice(0,10);}
+    else if(period==='1M'){var d1m=new Date(now);d1m.setMonth(d1m.getMonth()-1);cutoff=d1m.toISOString().slice(0,10);}
+    else if(period==='YTD'){cutoff=now.getFullYear()+'-01-01';}
+
+    var filtered=rawData.points.filter(function(p){return p.date>=cutoff});
+    if(filtered.length>=2){
+      var bp=filtered[0].pv,bb=filtered[0].bv;
+      var lastPv=filtered[filtered.length-1].pv,lastBv=filtered[filtered.length-1].bv;
+      chartData={
+        portData:filtered.map(function(p){return{x:new Date(p.date),y:((p.pv-bp)/bp)*100}}),
+        bmData:filtered.map(function(p){return{x:new Date(p.date),y:((p.bv-bb)/bb)*100}}),
+        pRet:((lastPv-bp)/bp)*100,
+        bRet:((lastBv-bb)/bb)*100
+      };
+    }
+  }
 
   // Render chart
   useEffect(function(){
     if(!ref.current||!chartData)return;
     if(ch.current)ch.current.destroy();
-    // Determine time axis settings based on data range
     var firstX=chartData.portData[0].x.getTime(),lastX=chartData.portData[chartData.portData.length-1].x.getTime();
     var spanHours=(lastX-firstX)/3600000;
     var timeUnit=spanHours<2?'minute':spanHours<48?'hour':spanHours<720?'day':'week';
@@ -209,17 +223,20 @@ function PerfChart(props){
   },[chartData,bmLbl]);
 
   var el=React.createElement;
+  var periods=['INCEP','YTD','1M','7D'];
   return el('div',null,
     status==='loading'&&el('div',{className:'chart-status'},'FETCHING HISTORICAL DATA...'),
     status==='building'&&el('div',{className:'chart-status',style:{color:'var(--yellow)'}},'BUILDING \u2014 '+(snapshots?snapshots.length:0)+' auto-snapshots (need 2+). Saving each minute.'),
-    (status==='done'&&chartData)?el('div',null,
-      el('div',{className:'chart-status'},
-        (chartData.src==='history'?'Since '+startDate:'From '+chartData.portData.length+' auto-snapshots')+
-        (chartData.cov!=null&&chartData.cov<100?' \u00b7 '+chartData.cov+'% coverage':'')+
-        (chartData.miss&&chartData.miss.length>0?' \u00b7 Missing: '+chartData.miss.join(', '):'')+
-        ' \u00b7 Port: '+(chartData.pRet>=0?'+':'')+chartData.pRet.toFixed(2)+'% vs BM: '+(chartData.bRet>=0?'+':'')+chartData.bRet.toFixed(2)+'%'
+    (status==='done')?el('div',null,
+      el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'4px 10px'}},
+        el('div',{className:'chart-status',style:{padding:0}},
+          chartData?('Port: '+(chartData.pRet>=0?'+':'')+chartData.pRet.toFixed(2)+'% vs BM: '+(chartData.bRet>=0?'+':'')+chartData.bRet.toFixed(2)+'%'+(rawData&&rawData.cov!=null&&rawData.cov<100?' \u00b7 '+rawData.cov+'% cov':'')+(rawData&&rawData.miss&&rawData.miss.length>0?' \u00b7 Missing: '+rawData.miss.join(', '):'')):'Not enough data for this period'
+        ),
+        el('div',{style:{display:'flex',gap:0}},
+          periods.map(function(p){return el('button',{key:p,onClick:function(){setPeriod(p)},style:{fontFamily:'var(--font)',fontSize:10,fontWeight:700,padding:'3px 10px',border:'1px solid '+(period===p?'var(--orange)':'var(--border-light)'),background:period===p?'var(--orange-dim)':'var(--bg-card)',color:period===p?'#000':'var(--text-muted)',cursor:'pointer',textTransform:'uppercase',letterSpacing:'0.04em'}},p)})
+        )
       ),
-      el('div',{className:'chart-wrap',style:{height:height}},el('canvas',{ref:ref}))
+      chartData?el('div',{className:'chart-wrap',style:{height:height}},el('canvas',{ref:ref})):el('div',{className:'empty-state',style:{height:100}},'NOT ENOUGH DATA FOR '+period+' \u2014 TRY A DIFFERENT PERIOD')
     ):null
   );
 }

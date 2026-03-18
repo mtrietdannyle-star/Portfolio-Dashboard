@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -146,7 +147,6 @@ async function fetchQuotes(symbols){
 }
 
 async function fetchHistory(symbol, rangeDays) {
-  // Calculate range string
   let range = '3mo';
   if (rangeDays <= 7) range = '5d';
   else if (rangeDays <= 35) range = '1mo';
@@ -157,8 +157,8 @@ async function fetchHistory(symbol, rangeDays) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=${range}`;
   for (let i = 0; i < PROXIES.length; i++) {
     try {
-      const r = await fetch(PROXIES[i](url), { signal: AbortSignal.timeout(12000) });
-      if (!r.ok) continue;
+      const r = await fetch(PROXIES[i](url), { signal: AbortSignal.timeout(15000) });
+      if (!r.ok) { console.warn(`[HIST] ${symbol} proxy ${i} HTTP ${r.status}`); continue; }
       const d = await r.json();
       const res = d?.chart?.result?.[0];
       if (res && res.timestamp) {
@@ -169,7 +169,15 @@ async function fetchHistory(symbol, rangeDays) {
           close: closes[idx],
         })).filter(d => d.close != null);
       }
-    } catch (e) { continue; }
+      // Check for Yahoo error
+      if (d?.chart?.error) {
+        console.warn(`[HIST] ${symbol} Yahoo error:`, d.chart.error.description);
+        return null; // Don't retry other proxies for Yahoo-side errors
+      }
+    } catch (e) {
+      console.warn(`[HIST] ${symbol} proxy ${i} failed:`, e.message);
+      continue;
+    }
   }
   return null;
 }
@@ -250,10 +258,23 @@ function PerfChart({positions,benchmarkComponents,rebalances,height=280}){
         const allTickers = [...new Set([...active.map(p => p.ticker), ...bmTickers])];
         const histMap = {};
 
-        await Promise.all(allTickers.map(async (ticker) => {
-          const hist = await fetchHistory(ticker, rangeDays);
-          if (hist && hist.length > 0) histMap[ticker] = hist;
-        }));
+        // Serialize requests to avoid overwhelming CORS proxies
+        for (const ticker of allTickers) {
+          if (cancelled) return;
+          try {
+            const hist = await fetchHistory(ticker, rangeDays);
+            if (hist && hist.length > 0) {
+              histMap[ticker] = hist;
+              console.log(`[HIST] ${ticker}: ${hist.length} days`);
+            } else {
+              console.warn(`[HIST] ${ticker}: no data returned`);
+            }
+          } catch (e) {
+            console.warn(`[HIST] ${ticker}: fetch failed`, e.message);
+          }
+          // Small delay between requests to be gentle on proxy
+          await new Promise(r => setTimeout(r, 200));
+        }
 
         if (cancelled) return;
 
@@ -261,58 +282,53 @@ function PerfChart({positions,benchmarkComponents,rebalances,height=280}){
         const activeWithHist = active.filter(p => histMap[p.ticker] && histMap[p.ticker].length > 1);
         const bmWithHist = bmTickers.filter(t => histMap[t] && histMap[t].length > 1);
 
-        if (activeWithHist.length === 0 || bmWithHist.length === 0) { setStatus('error'); return; }
+        console.log(`[HIST] ${activeWithHist.length}/${active.length} positions have data, ${bmWithHist.length}/${bmTickers.length} benchmarks`);
 
-        // Build date sets only from tickers that have data
-        const positionDateSets = activeWithHist.map(p => new Set(histMap[p.ticker].map(d => d.date)));
-        const bmDateSets = bmWithHist.map(t => new Set(histMap[t].map(d => d.date)));
+        if (bmWithHist.length === 0) {
+          console.error('[HIST] No benchmark history — cannot build chart');
+          setStatus('error'); return;
+        }
 
-        // Find dates where at least the benchmark + majority of positions have data
-        // Start with benchmark dates as base
-        let baseDates = new Set(bmDateSets[0]);
-        bmDateSets.slice(1).forEach(ds => {
+        // Use benchmark dates as the base calendar
+        let baseDates = new Set(histMap[bmWithHist[0]].map(d => d.date));
+        bmWithHist.slice(1).forEach(t => {
+          const ds = new Set(histMap[t].map(d => d.date));
           baseDates = new Set([...baseDates].filter(d => ds.has(d)));
         });
-
-        // Filter to dates after startDate
         baseDates = new Set([...baseDates].filter(d => d >= startDate));
-
-        // For each date, calculate portfolio value using available positions
-        // (positions without data for that date use last known price)
         const sortedDates = [...baseDates].sort();
-        if (sortedDates.length < 2) { setStatus('error'); return; }
 
-        // Build price lookup with forward-fill for missing days
+        if (sortedDates.length < 2) {
+          console.error(`[HIST] Only ${sortedDates.length} dates after ${startDate}`);
+          setStatus('error'); return;
+        }
+
+        // Build price lookup with forward-fill
         const priceLookup = {};
         Object.entries(histMap).forEach(([ticker, hist]) => {
           priceLookup[ticker] = {};
           hist.forEach(d => { priceLookup[ticker][d.date] = d.close; });
         });
-
-        // Forward-fill: for each ticker, fill gaps with last known price
         Object.keys(priceLookup).forEach(ticker => {
           let lastPrice = null;
           sortedDates.forEach(date => {
-            if (priceLookup[ticker][date] != null) {
-              lastPrice = priceLookup[ticker][date];
-            } else if (lastPrice != null) {
-              priceLookup[ticker][date] = lastPrice;
-            }
+            if (priceLookup[ticker][date] != null) lastPrice = priceLookup[ticker][date];
+            else if (lastPrice != null) priceLookup[ticker][date] = lastPrice;
           });
         });
 
-        // Calculate daily portfolio value
+        // Portfolio value per day
         const portValues = sortedDates.map(date => {
           let val = 0;
           active.forEach(p => {
             const price = priceLookup[p.ticker]?.[date];
             if (price) val += p.shares * price;
-            else val += p.shares * p.avgCost; // fallback to cost basis
+            else val += p.shares * p.avgCost;
           });
           return { date, value: val };
         });
 
-        // Calculate blended benchmark value
+        // Blended benchmark value per day
         const tw = benchmarkComponents.reduce((s, c) => s + c.weight, 0) || 100;
         const bmValues = sortedDates.map(date => {
           let val = 0;
@@ -323,25 +339,22 @@ function PerfChart({positions,benchmarkComponents,rebalances,height=280}){
           return { date, value: val };
         });
 
-        // Filter out any dates where portfolio value is 0
-        const validIndices = sortedDates.map((d, i) => i).filter(i => portValues[i].value > 0 && bmValues[i].value > 0);
-        if (validIndices.length < 2) { setStatus('error'); return; }
+        const validIdx = sortedDates.map((d, i) => i).filter(i => portValues[i].value > 0 && bmValues[i].value > 0);
+        if (validIdx.length < 2) { setStatus('error'); return; }
 
-        const baseP = portValues[validIndices[0]].value;
-        const baseB = bmValues[validIndices[0]].value;
-        const portData = validIndices.map(i => ({ x: new Date(portValues[i].date), y: ((portValues[i].value - baseP) / baseP) * 100 }));
-        const bmData = validIndices.map(i => ({ x: new Date(bmValues[i].date), y: ((bmValues[i].value - baseB) / baseB) * 100 }));
+        const baseP = portValues[validIdx[0]].value, baseB = bmValues[validIdx[0]].value;
+        const portData = validIdx.map(i => ({ x: new Date(portValues[i].date), y: ((portValues[i].value - baseP) / baseP) * 100 }));
+        const bmData = validIdx.map(i => ({ x: new Date(bmValues[i].date), y: ((bmValues[i].value - baseB) / baseB) * 100 }));
 
-        // Calculate summary stats for display
-        const lastPort = portValues[validIndices[validIndices.length - 1]].value;
-        const lastBm = bmValues[validIndices[validIndices.length - 1]].value;
-        const portReturn = ((lastPort - baseP) / baseP) * 100;
-        const bmReturn = ((lastBm - baseB) / baseB) * 100;
+        const lastP = portValues[validIdx[validIdx.length - 1]].value;
+        const lastB = bmValues[validIdx[validIdx.length - 1]].value;
+        const portReturn = ((lastP - baseP) / baseP) * 100;
+        const bmReturn = ((lastB - baseB) / baseB) * 100;
 
         setChartData({ portData, bmData, portReturn, bmReturn, coveredPct: Math.round((activeWithHist.length / active.length) * 100), missingTickers: active.filter(p => !histMap[p.ticker]).map(p => p.ticker) });
         setStatus('done');
       } catch (e) {
-        console.error('History fetch error:', e);
+        console.error('[HIST] Fatal error:', e);
         if (!cancelled) setStatus('error');
       }
     }
@@ -490,8 +503,10 @@ function App(){
   useEffect(()=>{save(data);},[data]);
 
   const doFetch=useCallback(async()=>{setApiStatus('loading');const bmT=data.benchmarkComponents.map(c=>c.ticker);const syms=[...new Set([...data.positions.map(p=>p.ticker),...bmT])];if(!syms.length){setApiStatus('live');return;}
-    try{const q=await fetchQuotes(syms);if(!q||!q.length){setApiStatus('error');return;}const m={};q.forEach(x=>{m[x.symbol]={price:x.regularMarketPrice,prevClose:x.regularMarketPreviousClose,change:x.regularMarketChange,changePct:x.regularMarketChangePercent,name:x.shortName||x.symbol};});
-      setPrices(m);setLastUpdate(new Date());setApiStatus('live');setCountdown(data.refreshInterval*60);setFetchCount(c=>c+1);}catch(e){setApiStatus('error');}
+    try{const q=await fetchQuotes(syms);if(!q||!q.length){setApiStatus('error');return;}
+      // MERGE into existing prices — never overwrite good data with missing data
+      setPrices(prev=>{const next={...prev};q.forEach(x=>{if(x.regularMarketPrice>0){next[x.symbol]={price:x.regularMarketPrice,prevClose:x.regularMarketPreviousClose,change:x.regularMarketChange,changePct:x.regularMarketChangePercent,name:x.shortName||x.symbol};}});return next;});
+      setLastUpdate(new Date());setApiStatus('live');setCountdown(data.refreshInterval*60);setFetchCount(c=>c+1);}catch(e){setApiStatus('error');}
   },[data.positions,data.benchmarkComponents,data.refreshInterval]);
 
   useEffect(()=>{doFetch();const t=setInterval(doFetch,data.refreshInterval*60*1000);return()=>clearInterval(t);},[doFetch,data.refreshInterval]);

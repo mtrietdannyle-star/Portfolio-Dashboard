@@ -102,98 +102,75 @@ const PIE_COLORS=['#ff8c00','#00bfff','#ffd700','#00d26a','#ff3b3b','#9966ff','#
 // PERFORMANCE CHART
 // ════════════════════════════════════════════════════
 function PerfChart(props){
-  var positions=props.positions,benchmarkComponents=props.benchmarkComponents,rebalances=props.rebalances,snapshots=props.snapshots,snapCount=props.snapCount||0,height=props.height||280;
-  var ref=useRef(null),ch=useRef(null);
+  var positions=props.positions,benchmarkComponents=props.benchmarkComponents,snapshots=props.snapshots,snapCount=props.snapCount||0,height=props.height||280;
+  var canvasRef=useRef(null),chartRef=useRef(null);
   var _s=useState('idle'),status=_s[0],setStatus=_s[1];
-  var _c=useState(null),rawData=_c[0],setRawData=_c[1]; // all data points
-  var _p=useState('INCEP'),period=_p[0],setPeriod=_p[1]; // INCEP, 7D, 1M, YTD
+  var histRef=useRef(null); // fetched once, never again
+  var didFetchRef=useRef(false);
+  var _p=useState('INCEP'),period=_p[0],setPeriod=_p[1];
   var active=positions.filter(function(p){return p.shares>0});
   var bmLbl=bmLabel(benchmarkComponents);
   var INCEPTION='2026-02-02';
 
-  // Fetch all available data (max range)
+  // Fetch history ONCE on mount only
   useEffect(function(){
-    if(active.length===0){setRawData(null);setStatus('idle');return;}
-    var cancelled=false;
+    if(active.length===0||didFetchRef.current)return;
+    didFetchRef.current=true;
+    setStatus('loading');
+    var bmTickers=benchmarkComponents.map(function(c){return c.ticker});
+    var allTickers=Array.from(new Set(active.map(function(p){return p.ticker}).concat(bmTickers)));
 
-    (async function(){
-      setStatus('loading');
-      var bmTickers=benchmarkComponents.map(function(c){return c.ticker});
-      var allTickers=Array.from(new Set(active.map(function(p){return p.ticker}).concat(bmTickers)));
-      var histMap=null;
-
-      // Always fetch max range for inception
-      try{histMap=await fetchBatchHistory(allTickers,'6mo');}catch(e){console.error('Batch history failed:',e);}
-      if(cancelled)return;
-
-      var allPoints=[];
-
-      // Build from history if available
+    fetchBatchHistory(allTickers,'6mo').then(function(histMap){
       if(histMap){
+        var pts=[];
         var bmWithHist=bmTickers.filter(function(t){return histMap[t]&&histMap[t].length>1});
         if(bmWithHist.length>0){
           var baseDates=new Set(histMap[bmWithHist[0]].map(function(d){return d.date}));
           bmWithHist.slice(1).forEach(function(t){var ds=new Set((histMap[t]||[]).map(function(d){return d.date}));baseDates=new Set(Array.from(baseDates).filter(function(d){return ds.has(d)}));});
           var sortedDates=Array.from(baseDates).sort();
-
           if(sortedDates.length>=2){
             var lookup={};Object.keys(histMap).forEach(function(t){lookup[t]={};histMap[t].forEach(function(d){lookup[t][d.date]=d.close;});});
             Object.keys(lookup).forEach(function(t){var last=null;sortedDates.forEach(function(d){if(lookup[t][d]!=null)last=lookup[t][d];else if(last!=null)lookup[t][d]=last;});});
-
             var tw=benchmarkComponents.reduce(function(s,c){return s+c.weight},0)||100;
             sortedDates.forEach(function(d){
               var pv=0;active.forEach(function(p){var pr=lookup[p.ticker]&&lookup[p.ticker][d];pv+=p.shares*(pr||p.avgCost);});
               var bv=0;benchmarkComponents.forEach(function(c){var pr=lookup[c.ticker]&&lookup[c.ticker][d];if(pr)bv+=(c.weight/tw)*pr;});
-              if(pv>0&&bv>0)allPoints.push({date:d,pv:pv,bv:bv,src:'hist'});
+              if(pv>0&&bv>0)pts.push({date:d,pv:pv,bv:bv});
             });
           }
         }
+        histRef.current=pts;
       }
+      setStatus('done');
+    }).catch(function(){setStatus('done');});
+  },[]);
 
-      // Append auto-snapshots (they have minute-level granularity)
-      if(snapshots&&snapshots.length>0){
-        var lastHistDate=allPoints.length>0?allPoints[allPoints.length-1].date:'';
-        snapshots.forEach(function(s){
-          // Only add snapshots that are after the last history date (avoid duplicates)
-          if(s.date>lastHistDate&&s.portfolioValue>0&&s.benchmarkValue>0){
-            allPoints.push({date:s.date,pv:s.portfolioValue,bv:s.benchmarkValue,src:'snap'});
-          }
-        });
+  // Build allPoints from histRef + snapshots (pure computation, no side effects)
+  var allPoints=[];
+  if(histRef.current&&histRef.current.length>0){
+    histRef.current.forEach(function(p){allPoints.push(p);});
+  }
+  if(snapshots&&snapshots.length>0){
+    var lastHistDate=allPoints.length>0?allPoints[allPoints.length-1].date:'';
+    snapshots.forEach(function(s){
+      if(s.date>lastHistDate&&s.portfolioValue>0&&s.benchmarkValue>0){
+        allPoints.push({date:s.date,pv:s.portfolioValue,bv:s.benchmarkValue});
       }
+    });
+  }
+  allPoints.sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
 
-      allPoints.sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
-
-      if(allPoints.length>=2){
-        var awh=histMap?active.filter(function(p){return!!histMap[p.ticker]}):[];
-        setRawData({
-          points:allPoints,
-          cov:histMap?Math.round((awh.length/active.length)*100):null,
-          miss:histMap?active.filter(function(p){return!histMap[p.ticker]}).map(function(p){return p.ticker}):null
-        });
-        setStatus('done');
-      } else if(snapshots&&snapshots.length>=2){
-        var snSorted=snapshots.slice().sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
-        setRawData({points:snSorted.map(function(s){return{date:s.date,pv:s.portfolioValue,bv:s.benchmarkValue,src:'snap'}}),cov:null,miss:null});
-        setStatus('done');
-      } else {
-        setStatus('building');
-      }
-    })();
-
-    return function(){cancelled=true;};
-  },[active.length,snapCount]);
-
-  // Filter data by period
+  // Filter by period
   var chartData=null;
-  if(rawData&&rawData.points.length>=2){
+  if(allPoints.length>=2){
     var cutoff='';
     var now=new Date();
-    if(period==='INCEP'){cutoff=INCEPTION;}
+    if(period==='INCEP')cutoff=INCEPTION;
     else if(period==='7D'){var d7=new Date(now);d7.setDate(d7.getDate()-7);cutoff=d7.toISOString().slice(0,10);}
     else if(period==='1M'){var d1m=new Date(now);d1m.setMonth(d1m.getMonth()-1);cutoff=d1m.toISOString().slice(0,10);}
-    else if(period==='YTD'){cutoff=now.getFullYear()+'-01-01';}
+    else if(period==='YTD')cutoff=now.getFullYear()+'-01-01';
 
-    var filtered=rawData.points.filter(function(p){return p.date>=cutoff});
+    var filtered=allPoints.filter(function(p){return p.date>=cutoff});
     if(filtered.length>=2){
       var bp=filtered[0].pv,bb=filtered[0].bv;
       var lastPv=filtered[filtered.length-1].pv,lastBv=filtered[filtered.length-1].bv;
@@ -206,37 +183,59 @@ function PerfChart(props){
     }
   }
 
-  // Render chart
-  useEffect(function(){
-    if(!ref.current||!chartData)return;
-    if(ch.current)ch.current.destroy();
-    var firstX=chartData.portData[0].x.getTime(),lastX=chartData.portData[chartData.portData.length-1].x.getTime();
-    var spanHours=(lastX-firstX)/3600000;
-    var timeUnit=spanHours<2?'minute':spanHours<48?'hour':spanHours<720?'day':'week';
-    var timeFmt=timeUnit==='minute'?'HH:mm':timeUnit==='hour'?'MMM d HH:mm':'MMM d, yyyy';
+  // Update chart — use Chart.js data update instead of destroy/create when possible
+  var prevPeriodRef=useRef(period);
+  var prevLenRef=useRef(0);
 
-    ch.current=new Chart(ref.current,{type:'line',data:{datasets:[
-      {label:'Portfolio',data:chartData.portData,borderColor:'#ff8c00',backgroundColor:'rgba(255,140,0,.04)',borderWidth:2,fill:true,tension:0.2,pointRadius:chartData.portData.length<50?3:0,pointHitRadius:8,pointBackgroundColor:'#ff8c00'},
-      {label:bmLbl,data:chartData.bmData,borderColor:'#555',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.2,pointRadius:chartData.bmData.length<50?2:0,pointHitRadius:8}
-    ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:{backgroundColor:'#111',borderColor:'#ff8c00',borderWidth:1,titleFont:{family:'Helvetica',size:10},bodyFont:{family:'Helvetica',size:10},padding:8,displayColors:false,callbacks:{label:function(c){return c.dataset.label+': '+(c.parsed.y>=0?'+':'')+c.parsed.y.toFixed(2)+'%'}}}},scales:{x:{type:'time',time:{unit:timeUnit,tooltipFormat:timeFmt},grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},maxTicksLimit:12},border:{display:false}},y:{grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},callback:function(v){return(v>=0?'+':'')+v.toFixed(1)+'%'}},border:{display:false}}}}});
-    return function(){if(ch.current)ch.current.destroy();};
-  },[chartData,bmLbl]);
+  useEffect(function(){
+    if(!canvasRef.current||!chartData)return;
+
+    var needsRebuild=!chartRef.current||prevPeriodRef.current!==period;
+    prevPeriodRef.current=period;
+
+    if(needsRebuild){
+      // Full rebuild only on period change or first render
+      if(chartRef.current)chartRef.current.destroy();
+      var firstX=chartData.portData[0].x.getTime(),lastX=chartData.portData[chartData.portData.length-1].x.getTime();
+      var spanHours=(lastX-firstX)/3600000;
+      var timeUnit=spanHours<2?'minute':spanHours<48?'hour':spanHours<720?'day':'week';
+      var timeFmt=timeUnit==='minute'?'HH:mm':timeUnit==='hour'?'MMM d HH:mm':'MMM d, yyyy';
+
+      chartRef.current=new Chart(canvasRef.current,{type:'line',data:{datasets:[
+        {label:'Portfolio',data:chartData.portData,borderColor:'#ff8c00',backgroundColor:'rgba(255,140,0,.04)',borderWidth:2,fill:true,tension:0.2,pointRadius:chartData.portData.length<50?3:0,pointHitRadius:8,pointBackgroundColor:'#ff8c00'},
+        {label:bmLbl,data:chartData.bmData,borderColor:'#555',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.2,pointRadius:chartData.bmData.length<50?2:0,pointHitRadius:8}
+      ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},animation:{duration:0},plugins:{legend:{display:false},tooltip:{backgroundColor:'#111',borderColor:'#ff8c00',borderWidth:1,titleFont:{family:'Helvetica',size:10},bodyFont:{family:'Helvetica',size:10},padding:8,displayColors:false,callbacks:{label:function(c){return c.dataset.label+': '+(c.parsed.y>=0?'+':'')+c.parsed.y.toFixed(2)+'%'}}}},scales:{x:{type:'time',time:{unit:timeUnit,tooltipFormat:timeFmt},grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},maxTicksLimit:12},border:{display:false}},y:{grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},callback:function(v){return(v>=0?'+':'')+v.toFixed(1)+'%'}},border:{display:false}}}}});
+      prevLenRef.current=chartData.portData.length;
+    } else if(chartRef.current&&chartData.portData.length!==prevLenRef.current){
+      // Lightweight data update — no destroy/create
+      chartRef.current.data.datasets[0].data=chartData.portData;
+      chartRef.current.data.datasets[1].data=chartData.bmData;
+      chartRef.current.update('none'); // no animation
+      prevLenRef.current=chartData.portData.length;
+    }
+
+    return function(){};
+  });
+
+  // Cleanup on unmount only
+  useEffect(function(){return function(){if(chartRef.current){chartRef.current.destroy();chartRef.current=null;}};},[]);
 
   var el=React.createElement;
   var periods=['INCEP','YTD','1M','7D'];
+  var hasData=allPoints.length>=2;
   return el('div',null,
     status==='loading'&&el('div',{className:'chart-status'},'FETCHING HISTORICAL DATA...'),
-    status==='building'&&el('div',{className:'chart-status',style:{color:'var(--yellow)'}},'BUILDING \u2014 '+(snapshots?snapshots.length:0)+' auto-snapshots (need 2+). Saving every 5 min.'),
-    (status==='done')?el('div',null,
+    (!hasData&&status==='done')&&el('div',{className:'chart-status',style:{color:'var(--yellow)'}},'BUILDING \u2014 '+(snapshots?snapshots.length:0)+' snapshots (need 2+). Next in ~1 min.'),
+    hasData?el('div',null,
       el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'4px 10px'}},
         el('div',{className:'chart-status',style:{padding:0}},
-          chartData?('Port: '+(chartData.pRet>=0?'+':'')+chartData.pRet.toFixed(2)+'% vs BM: '+(chartData.bRet>=0?'+':'')+chartData.bRet.toFixed(2)+'%'+(rawData&&rawData.cov!=null&&rawData.cov<100?' \u00b7 '+rawData.cov+'% cov':'')+(rawData&&rawData.miss&&rawData.miss.length>0?' \u00b7 Missing: '+rawData.miss.join(', '):'')):'Not enough data for this period'
+          chartData?('Port: '+(chartData.pRet>=0?'+':'')+chartData.pRet.toFixed(2)+'% vs BM: '+(chartData.bRet>=0?'+':'')+chartData.bRet.toFixed(2)+'%'):'Not enough data for this period'
         ),
         el('div',{style:{display:'flex',gap:0}},
           periods.map(function(p){return el('button',{key:p,onClick:function(){setPeriod(p)},style:{fontFamily:'var(--font)',fontSize:10,fontWeight:700,padding:'3px 10px',border:'1px solid '+(period===p?'var(--orange)':'var(--border-light)'),background:period===p?'var(--orange-dim)':'var(--bg-card)',color:period===p?'#000':'var(--text-muted)',cursor:'pointer',textTransform:'uppercase',letterSpacing:'0.04em'}},p)})
         )
       ),
-      chartData?el('div',{className:'chart-wrap',style:{height:height}},el('canvas',{ref:ref})):el('div',{className:'empty-state',style:{height:100}},'NOT ENOUGH DATA FOR '+period+' \u2014 TRY A DIFFERENT PERIOD')
+      chartData?el('div',{className:'chart-wrap',style:{height:height}},el('canvas',{ref:canvasRef})):el('div',{className:'empty-state',style:{height:100}},'NOT ENOUGH DATA FOR '+period)
     ):null
   );
 }
@@ -323,9 +322,8 @@ function App(){
       var priceMap={};q.forEach(function(x){if(x.regularMarketPrice>0)priceMap[x.symbol]={price:x.regularMarketPrice,prevClose:x.regularMarketPreviousClose,change:x.regularMarketChange,changePct:x.regularMarketChangePercent,name:x.shortName||x.symbol};});
       setPrices(function(prev){var next=Object.assign({},prev);Object.keys(priceMap).forEach(function(k){next[k]=priceMap[k];});return next;});
 
-      // Auto-snapshot — throttled to every 5 minutes, stored outside React state
       var now=Date.now();
-      if(now-lastSnapTime.current>=300000){ // 5 min
+      if(now-lastSnapTime.current>=60000){ // 1 min
         var activePos=d.positions.filter(function(p){return p.shares>0});
         if(activePos.length>0){
           var portVal=0;activePos.forEach(function(p){var pr=priceMap[p.ticker];if(pr)portVal+=p.shares*pr.price;});

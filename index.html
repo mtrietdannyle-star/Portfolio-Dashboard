@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -194,10 +195,16 @@ function PerfChart(props){
   useEffect(function(){
     if(!ref.current||!chartData)return;
     if(ch.current)ch.current.destroy();
+    // Determine time axis settings based on data range
+    var firstX=chartData.portData[0].x.getTime(),lastX=chartData.portData[chartData.portData.length-1].x.getTime();
+    var spanHours=(lastX-firstX)/3600000;
+    var timeUnit=spanHours<2?'minute':spanHours<48?'hour':spanHours<720?'day':'week';
+    var timeFmt=timeUnit==='minute'?'HH:mm':timeUnit==='hour'?'MMM d HH:mm':'MMM d, yyyy';
+
     ch.current=new Chart(ref.current,{type:'line',data:{datasets:[
-      {label:'Portfolio',data:chartData.portData,borderColor:'#ff8c00',backgroundColor:'rgba(255,140,0,.04)',borderWidth:2,fill:true,tension:0.2,pointRadius:0,pointHitRadius:8},
-      {label:bmLbl,data:chartData.bmData,borderColor:'#555',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.2,pointRadius:0,pointHitRadius:8}
-    ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:{backgroundColor:'#111',borderColor:'#ff8c00',borderWidth:1,titleFont:{family:'Helvetica',size:10},bodyFont:{family:'Helvetica',size:10},padding:8,displayColors:false,callbacks:{label:function(c){return c.dataset.label+': '+(c.parsed.y>=0?'+':'')+c.parsed.y.toFixed(2)+'%'}}}},scales:{x:{type:'time',time:{unit:'day',tooltipFormat:'MMM d, yyyy'},grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},maxTicksLimit:12},border:{display:false}},y:{grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},callback:function(v){return(v>=0?'+':'')+v.toFixed(1)+'%'}},border:{display:false}}}}});
+      {label:'Portfolio',data:chartData.portData,borderColor:'#ff8c00',backgroundColor:'rgba(255,140,0,.04)',borderWidth:2,fill:true,tension:0.2,pointRadius:chartData.portData.length<50?3:0,pointHitRadius:8,pointBackgroundColor:'#ff8c00'},
+      {label:bmLbl,data:chartData.bmData,borderColor:'#555',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.2,pointRadius:chartData.bmData.length<50?2:0,pointHitRadius:8}
+    ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:{backgroundColor:'#111',borderColor:'#ff8c00',borderWidth:1,titleFont:{family:'Helvetica',size:10},bodyFont:{family:'Helvetica',size:10},padding:8,displayColors:false,callbacks:{label:function(c){return c.dataset.label+': '+(c.parsed.y>=0?'+':'')+c.parsed.y.toFixed(2)+'%'}}}},scales:{x:{type:'time',time:{unit:timeUnit,tooltipFormat:timeFmt},grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},maxTicksLimit:12},border:{display:false}},y:{grid:{color:'rgba(50,50,50,.5)',drawBorder:false},ticks:{color:'#555',font:{family:'Helvetica',size:9},callback:function(v){return(v>=0?'+':'')+v.toFixed(1)+'%'}},border:{display:false}}}}});
     return function(){if(ch.current)ch.current.destroy();};
   },[chartData,bmLbl]);
 
